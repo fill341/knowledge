@@ -1,0 +1,12 @@
+{
+  "comment": "Пример формата. Рабочий набор — eval/local/queries.json (не в git).",
+  "project": "personal/knowledge",
+  "k": 10,
+  "max_tokens": 6000,
+  "cases": [
+    { "id": "ports", "query": "на каком порту открывается веб-интерфейс базы знаний", "mode": "both",
+      "expect": [ { "title": "Где что живёт в локальной установке kn" } ] },
+    { "id": "isolation", "query": "как разделить личные и рабочие знания в одной базе",
+      "expect": [ { "source_ref": "docs/architecture.md#adr-1" } ], "note": "ожидание по source_ref" }
+  ]
+}

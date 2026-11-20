@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "knowledge": {
+      "command": "/ABS/knowledge/scripts/kn-mcp-launch",
+      "args": ["cursor", "personal"]
+    }
+  }
+}

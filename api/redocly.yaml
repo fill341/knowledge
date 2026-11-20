@@ -1,0 +1,7 @@
+extends:
+  - recommended
+rules:
+  # Local single-user API: operation IDs, a license and per-operation 4xx lists add noise, not value.
+  operation-operationId: off
+  operation-4xx-response: off
+  info-license: off

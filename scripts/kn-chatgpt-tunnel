@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# kn-chatgpt-tunnel — connect ChatGPT to the local knowledge base through OpenAI Secure MCP Tunnel.
+#
+#   kn-chatgpt-tunnel init <tunnel_id>   one-time: create the tunnel-client profile
+#   kn-chatgpt-tunnel doctor             check the setup
+#   kn-chatgpt-tunnel [run]              run the tunnel (keep it running while you use ChatGPT)
+#
+# tunnel-client only makes outbound HTTPS connections to OpenAI and starts kn-mcp over stdio with the
+# chatgpt@personal token from the Keychain, so the knowledge base is never exposed to the internet.
+# The OpenAI runtime API key is read from $CONTROL_PLANE_API_KEY or the Keychain
+# (service "openai-tunnel", account "control-plane"). See adapters/chatgpt/README.md.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+profile="kn-chatgpt"
+
+tc="$(command -v tunnel-client || true)"
+if [ -z "$tc" ] && [ -x "$here/bin/tunnel-client" ]; then tc="$here/bin/tunnel-client"; fi
+if [ -z "$tc" ]; then
+  echo "tunnel-client not found: put it into $here/bin/ or PATH (https://github.com/openai/tunnel-client/releases/latest, darwin-arm64)" >&2
+  exit 1
+fi
+# kn-mcp has no OAuth (ChatGPT plugin uses "No authentication"): skip OAuth discovery probes (tunnel-client v0.0.21+).
+export MCP_OAUTH_DISCOVERY="${MCP_OAUTH_DISCOVERY:-disabled}"
+if [ -z "${CONTROL_PLANE_API_KEY:-}" ]; then
+  if ! CONTROL_PLANE_API_KEY="$(security find-generic-password -s openai-tunnel -a control-plane -w 2>/dev/null)"; then
+    echo "no OpenAI runtime API key: run" >&2
+    echo "  security add-generic-password -U -s openai-tunnel -a control-plane -w 'sk-...'" >&2
+    exit 1
+  fi
+fi
+export CONTROL_PLANE_API_KEY
+
+case "${1:-run}" in
+  init)
+    tunnel_id="${2:?usage: kn-chatgpt-tunnel init <tunnel_id>}"
+    exec "$tc" init --sample sample_mcp_stdio_local --profile "$profile" --tunnel-id "$tunnel_id" \
+      --mcp-command "$here/scripts/kn-mcp-launch chatgpt personal"
+    ;;
+  doctor) exec "$tc" doctor --profile "$profile" --explain ;;
+  run)    exec "$tc" run --profile "$profile" ;;
+  *)      echo "usage: kn-chatgpt-tunnel [init <tunnel_id> | doctor | run]" >&2; exit 2 ;;
+esac

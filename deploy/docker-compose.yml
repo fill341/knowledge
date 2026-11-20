@@ -1,0 +1,141 @@
+name: knowledge
+
+x-api-build: &api-build
+  context: ..
+  dockerfile: services/knowledge-api/Dockerfile
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: knowledge
+      POSTGRES_USER: kn_owner
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_owner_password
+      KN_APP_PASSWORD_FILE: /run/secrets/pg_app_password   # read by the init script
+    secrets: [pg_owner_password, pg_app_password]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:${KN_PG_PORT:-5433}:5432"   # local admin access and integration tests only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kn_owner -d knowledge"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [backend]
+
+  migrate:
+    build: *api-build
+    image: knowledge-api:local
+    command: ["migrate", "up"]
+    environment:
+      KN_DB_HOST: postgres
+      KN_DB_NAME: knowledge
+      KN_DB_USER: kn_owner
+      KN_DB_PASSWORD_FILE: /run/secrets/pg_owner_password
+    secrets: [pg_owner_password]
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+    networks: [backend]
+
+  knowledge-api:
+    image: knowledge-api:local   # built by the migrate service
+    pull_policy: never
+    command: ["serve"]
+    restart: unless-stopped
+    environment:
+      KN_HTTP_ADDR: 0.0.0.0:8787
+      KN_DB_HOST: postgres
+      KN_DB_NAME: knowledge
+      KN_DB_USER: kn_app
+      KN_DB_PASSWORD_FILE: /run/secrets/pg_app_password
+      KN_LOG_LEVEL: ${KN_LOG_LEVEL:-info}
+      KN_AUDIT_READS: ${KN_AUDIT_READS:-false}
+    secrets: [pg_app_password]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    ports:
+      - "127.0.0.1:${KN_API_PORT:-8787}:8787"
+    healthcheck:
+      test: ["CMD", "/kn-api", "healthcheck"]   # distroless: no shell, no curl
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    read_only: true
+    networks: [backend]
+
+  backup:
+    image: pgvector/pgvector:pg17   # same major version as the server, for pg_dump
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/backup.sh"]
+    environment:
+      PGHOST: postgres
+      PGDATABASE: knowledge
+      PGUSER: kn_owner
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+      BACKUP_KEEP: ${BACKUP_KEEP:-14}
+    secrets: [pg_owner_password]
+    volumes:
+      - ./backup/backup.sh:/backup.sh:ro
+      - ${KN_BACKUP_DIR:-./backups}:/backups
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [backend]
+
+  # Web UI: review, search, entries, projects, tokens and RBAC, audit. Sign in with a human token.
+  web-ui:
+    build:
+      context: ..
+      dockerfile: services/web-ui/Dockerfile
+    image: knowledge-web-ui:local
+    restart: unless-stopped
+    environment:
+      KN_API_URL: http://knowledge-api:8787
+      KN_UI_ADDR: 0.0.0.0:8790
+      KN_UI_SESSION_KEY_FILE: /run/secrets/ui_session_key
+    secrets: [ui_session_key]
+    ports:
+      - "127.0.0.1:${KN_UI_PORT:-8790}:8790"
+    depends_on:
+      knowledge-api: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "/kn-ui", "healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    read_only: true
+    networks: [backend]
+
+  # Only for MCP clients that cannot spawn a stdio process.
+  # The client sends its own token in the Authorization header; this server stores none.
+  mcp-http:
+    profiles: ["mcp-http"]
+    build:
+      context: ..
+      dockerfile: services/mcp-server/Dockerfile
+    command: ["--http", "0.0.0.0:8788"]
+    environment:
+      KN_API_URL: http://knowledge-api:8787
+    ports:
+      - "127.0.0.1:${KN_MCP_PORT:-8788}:8788"
+    depends_on:
+      knowledge-api: { condition: service_healthy }
+    read_only: true
+    networks: [backend]
+
+secrets:
+  pg_owner_password:
+    file: ./secrets/pg_owner_password
+  pg_app_password:
+    file: ./secrets/pg_app_password
+  ui_session_key:
+    file: ./secrets/ui_session_key
+
+volumes:
+  pgdata:
+
+networks:
+  backend:

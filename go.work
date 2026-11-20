@@ -1,0 +1,9 @@
+go 1.27.1
+
+use (
+	./cli/kn
+	./pkg/kclient
+	./services/knowledge-api
+	./services/mcp-server
+	./services/web-ui
+)

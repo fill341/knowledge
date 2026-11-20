@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 15,
+            "command": "KN_PRINCIPAL=claude-code@personal /ABS/knowledge/bin/kn context --repo-from-cwd --hook --max-tokens 2700"
+          }
+        ]
+      }
+    ]
+  }
+}

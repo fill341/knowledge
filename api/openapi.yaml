@@ -1,0 +1,963 @@
+openapi: 3.1.0
+info:
+  title: Knowledge API
+  version: 1.0.0
+  description: |
+    Local, provider-independent knowledge store for AI agents. See docs/api.md for the rules behind
+    each endpoint (quality pipeline, lifecycle, context packing).
+
+    Conventions:
+    - Every endpoint except /healthz and /readyz requires `Authorization: Bearer kn_<prefix>_<secret>`.
+    - Reads are limited to the spaces the token can read; an entry in another space is reported as 404.
+    - Errors are RFC 9457 problems (`application/problem+json`) with a machine-readable `code`.
+    - Request bodies are strict: unknown fields are rejected with 400.
+    - POST accepts `Idempotency-Key`; a repeated key with the same request replays the stored response.
+servers:
+  - url: http://127.0.0.1:8787
+security:
+  - bearer: []
+
+paths:
+  /healthz:
+    get:
+      summary: Liveness
+      security: []
+      responses:
+        "200": { description: Process is alive }
+  /readyz:
+    get:
+      summary: Readiness (database reachable, migrations applied)
+      security: []
+      responses:
+        "200": { description: Ready }
+        "503": { description: Not ready }
+
+  /v1/me:
+    get:
+      summary: Current principal, scopes and accessible spaces
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Me" } } } }
+        "401": { $ref: "#/components/responses/Problem" }
+  /v1/spaces:
+    get:
+      summary: Spaces readable by the token
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/SpaceList" } } } }
+  /v1/kinds:
+    get:
+      summary: Entry kinds with their attribute schemas
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/KindList" } } } }
+
+  /v1/projects:
+    get:
+      summary: List projects
+      parameters:
+        - { name: space, in: query, schema: { type: string } }
+        - { name: repo_url, in: query, schema: { type: string } }
+        - { name: include_archived, in: query, schema: { type: boolean } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/ProjectList" } } } }
+    post:
+      summary: Create a project (write in the space)
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/CreateProject" } } }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/Project" } } } }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+  /v1/projects/resolve:
+    post:
+      summary: Find the project registered for a git remote (any URL spelling)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [repo_url], additionalProperties: false, properties: { repo_url: { type: string } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Project" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+  /v1/projects/{space}/{slug}/skill:
+    parameters:
+      - { name: space, in: path, required: true, schema: { type: string } }
+      - { name: slug, in: path, required: true, schema: { type: string } }
+    get:
+      summary: Knowledge Skill (ADR-14) — the project's approved rules and decisions as an agent file; deterministic
+      parameters:
+        - { name: format, in: query, schema: { type: string, enum: [claude, cursor, agents], default: claude } }
+      responses:
+        "200": { description: "{project, format, path, content, entries, indexed}; path is relative to the repository root (agents: the section between kn markers of AGENTS.md)" }
+        "422": { $ref: "#/components/responses/Problem" }
+  /v1/projects/{space}/{slug}:
+    parameters:
+      - { name: space, in: path, required: true, schema: { type: string } }
+      - { name: slug, in: path, required: true, schema: { type: string } }
+    get:
+      summary: Get a project
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Project" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+    patch:
+      summary: Update a project
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/PatchProject" } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Project" } } } }
+
+  /v1/entries:
+    get:
+      summary: List entries, newest first (cursor pagination)
+      parameters:
+        - { name: space, in: query, schema: { type: string } }
+        - { name: project, in: query, description: "<space>/<slug>", schema: { type: string } }
+        - { name: kind, in: query, description: comma-separated, schema: { type: string } }
+        - { name: status, in: query, description: comma-separated, schema: { type: string } }
+        - { name: tag, in: query, description: "comma-separated; all must match", schema: { type: string } }
+        - { name: pinned, in: query, schema: { type: boolean } }
+        - { name: updated_since, in: query, schema: { type: string, format: date-time } }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/EntryPage" } } } }
+    post:
+      summary: Create an entry (runs the quality pipeline)
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/CreateEntry" } } }
+      responses:
+        "201":
+          description: Created
+          headers: { ETag: { $ref: "#/components/headers/ETag" } }
+          content: { application/json: { schema: { $ref: "#/components/schemas/EntryResult" } } }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { description: "duplicate (existing_id) ", content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+        "422": { description: "validation_failed | secret_detected | provenance_required", content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+        "429": { $ref: "#/components/responses/Problem" }
+  /v1/entries/{id}:
+    parameters: [{ $ref: "#/components/parameters/EntryID" }]
+    get:
+      summary: Get an entry with links
+      responses:
+        "200":
+          description: OK
+          headers: { ETag: { $ref: "#/components/headers/ETag" } }
+          content: { application/json: { schema: { $ref: "#/components/schemas/EntryDetail" } } }
+        "404": { $ref: "#/components/responses/Problem" }
+    patch:
+      summary: Update an entry (optimistic locking)
+      parameters: [{ $ref: "#/components/parameters/IfMatch" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/PatchEntry" } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/EntryResult" } } } }
+        "412": { description: version_conflict (current_version), content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+        "428": { $ref: "#/components/responses/Problem" }
+  /v1/entries/{id}/transition:
+    parameters: [{ $ref: "#/components/parameters/EntryID" }]
+    post:
+      summary: Change status (see lifecycle in docs/data-model.md)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to]
+              additionalProperties: false
+              properties:
+                to: { $ref: "#/components/schemas/Status" }
+                superseded_by: { type: string, format: uuid }
+                note: { type: string }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/EntryResult" } } } }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { description: invalid_transition, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+  /v1/entries/{id}/promote:
+    parameters: [{ $ref: "#/components/parameters/EntryID" }]
+    post:
+      summary: Copy into another space with a derived_from link
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, properties: { to_space: { type: string }, to_project: { type: string } } }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/EntryResult" } } } }
+  /v1/entries/{id}/versions:
+    parameters: [{ $ref: "#/components/parameters/EntryID" }]
+    get:
+      summary: Version history, newest first
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: "#/components/schemas/EntryVersion" } } } } } } }
+  /v1/entries/{id}/versions/{n}:
+    parameters:
+      - { $ref: "#/components/parameters/EntryID" }
+      - { name: n, in: path, required: true, schema: { type: integer, minimum: 1 } }
+    get:
+      summary: One version
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/EntryVersion" } } } }
+  /v1/entries/{id}/revert:
+    parameters: [{ $ref: "#/components/parameters/EntryID" }]
+    post:
+      summary: Write a new version with the content of an older one
+      parameters: [{ $ref: "#/components/parameters/IfMatch" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [to_version], additionalProperties: false, properties: { to_version: { type: integer, minimum: 1 } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/EntryResult" } } } }
+  /v1/entries/{id}/link-suggestions:
+    parameters: [{ $ref: "#/components/parameters/EntryID" }]
+    get:
+      summary: Related live decisions, rules, lessons and facts of the same space to link to (proposals only, never linked automatically)
+      responses:
+        "200": { description: "{items: [{id, title, status, similarity}]}, up to 5" }
+  /v1/entries/{id}/impact:
+    parameters: [{ $ref: "#/components/parameters/EntryID" }]
+    get:
+      summary: Impact analysis — live visible entries relying on this one through depends_on / references / derived_from, up to 3 steps
+      responses:
+        "200": { description: "{count, direct, dependents: [HealthItem + depth, rel, via]}" }
+  /v1/entries/{id}/links:
+    parameters: [{ $ref: "#/components/parameters/EntryID" }]
+    get:
+      summary: Outgoing and incoming links (only to visible entries)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Links" } } } }
+    post:
+      summary: Link to another entry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to_id, rel]
+              additionalProperties: false
+              properties:
+                to_id: { type: string, format: uuid }
+                rel: { $ref: "#/components/schemas/LinkRel" }
+      responses:
+        "201": { description: Created }
+  /v1/entries/{id}/links/{to}/{rel}:
+    parameters:
+      - { $ref: "#/components/parameters/EntryID" }
+      - { name: to, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: rel, in: path, required: true, schema: { $ref: "#/components/schemas/LinkRel" } }
+    delete:
+      summary: Remove a link
+      responses:
+        "204": { description: Deleted }
+  /v1/entries/{id}/review:
+    parameters: [{ $ref: "#/components/parameters/EntryID" }]
+    post:
+      summary: Approve (→ active), reject (→ archived) or request changes (→ draft). Humans with review only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              additionalProperties: false
+              properties:
+                action: { type: string, enum: [approve, reject, request_changes] }
+                comment: { type: string }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/EntryResult" } } } }
+        "403": { $ref: "#/components/responses/Problem" }
+  /v1/review-queue:
+    get:
+      summary: Proposed entries and active entries due for re-check (review_after, else last change + the kind's review_days); duplicate_of lists live entries with the same text
+      parameters: [{ $ref: "#/components/parameters/Limit" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      allOf:
+                        - { $ref: "#/components/schemas/Entry" }
+                        - type: object
+                          properties:
+                            duplicate_of: { type: array, items: { $ref: "#/components/schemas/Similar" } }
+
+  /v1/search:
+    post:
+      summary: Full-text search (Russian config; English stemming for Latin words); when every-word FTS finds < 3, fuzzy titles then any-word FTS ranked by word coverage
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/SearchRequest" } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/SearchPage" } } } }
+        "422": { description: unsupported_mode, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+  /v1/context:
+    post:
+      summary: Context pack for an agent within a token budget
+      parameters:
+        - { name: format, in: query, schema: { type: string, enum: [json, markdown] }, description: "markdown returns text/markdown" }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ContextRequest" } } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/ContextResult" } }
+            text/markdown: { schema: { type: string } }
+
+  /v1/sessions:
+    post:
+      summary: Start an agent session (provenance for entries)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent]
+              additionalProperties: false
+              properties:
+                agent: { type: string }
+                space: { type: string }
+                project: { type: string }
+                repo_url: { type: string }
+                client_info: { type: object }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/Session" } } } }
+  /v1/sessions/{id}/end:
+    parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+    post:
+      summary: End a session; save outcomes independently and a structured session_log entry (ADR-11)
+      description: |
+        A log with status in_progress or blocked is unfinished work: kn_context of the project shows it (section
+        handoff, up to 3, 30 days) until a later session log lists its id in continues.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                summary: { type: string, description: "Falls back to goal when empty; no log without both" }
+                files_touched: { type: array, items: { type: string } }
+                goal: { type: string, maxLength: 500 }
+                status: { type: string, enum: [done, in_progress, blocked], description: "Default: in_progress with next_steps, else done" }
+                done: { type: array, items: { type: string }, maxItems: 50 }
+                commits: { type: array, items: { type: string }, maxItems: 50 }
+                open_questions: { type: array, items: { type: string }, maxItems: 30 }
+                next_steps: { type: array, items: { type: string }, maxItems: 30 }
+                continues: { type: array, items: { type: string, format: uuid }, maxItems: 20, description: "Visible session logs this session picked up" }
+                outcomes:
+                  type: array
+                  items:
+                    type: object
+                    required: [kind, title]
+                    additionalProperties: false
+                    properties:
+                      kind: { type: string }
+                      title: { type: string }
+                      summary: { type: string }
+                      body: { type: string }
+                      attributes: { type: object }
+                      tags: { type: array, items: { type: string } }
+                      confidence: { type: number }
+                      source_ref: { type: string }
+      responses:
+        "200": { description: OK }
+
+  /v1/export:
+    get:
+      summary: Export (JSONL stream or tar.gz of Markdown files)
+      parameters:
+        - { name: format, in: query, schema: { type: string, enum: [jsonl, markdown], default: jsonl } }
+        - { name: space, in: query, description: repeatable, schema: { type: string } }
+        - { name: include_history, in: query, schema: { type: boolean } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/x-ndjson: { schema: { type: string } }
+            application/gzip: { schema: { type: string, format: binary } }
+  /v1/import:
+    post:
+      summary: Import a JSONL export (global admin). Each line is applied in its own savepoint.
+      parameters:
+        - { name: mode, in: query, schema: { type: string, enum: [create_only, upsert_by_id], default: create_only } }
+        - { name: dry_run, in: query, schema: { type: boolean } }
+        - name: skip_duplicate_content
+          in: query
+          description: "Skip new entries whose text equals a live entry of the space. Duplicates are listed in the report either way."
+          schema: { type: boolean, default: false }
+      requestBody:
+        required: true
+        content: { application/x-ndjson: { schema: { type: string } } }
+      responses:
+        "200": { description: "Import report: counters, duplicates[{line, id, title, existing_id, skipped}], errors[{line, error}]" }
+
+  /v1/admin/principals:
+    get:
+      summary: List principals (admin)
+      responses: { "200": { description: OK } }
+    post:
+      summary: Create a principal (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              additionalProperties: false
+              properties:
+                kind: { type: string, enum: [user, agent, system], default: agent }
+                name: { type: string, pattern: "^[a-z0-9][a-z0-9._@-]{0,63}$" }
+                description: { type: string }
+      responses: { "201": { description: Created } }
+  /v1/admin/tokens:
+    get:
+      summary: List tokens without secrets (admin)
+      responses: { "200": { description: OK } }
+    post:
+      summary: Issue a token; the secret is returned once (admin). Agents cannot hold review/admin.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [principal, scopes]
+              additionalProperties: false
+              properties:
+                principal: { type: string }
+                name: { type: string }
+                scopes: { type: array, items: { type: string, examples: ["admin", "space:work:write"] } }
+                expires_in_days: { type: integer, minimum: 0 }
+                create_principal: { type: boolean }
+      responses: { "201": { description: Created } }
+  /v1/admin/tokens/{id}/revoke:
+    parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+    post:
+      summary: Revoke a token (admin)
+      responses: { "200": { description: OK } }
+  /v1/admin/audit:
+    get:
+      summary: Audit log, newest first (admin)
+      parameters:
+        - { name: principal, in: query, schema: { type: string } }
+        - { name: action, in: query, schema: { type: string } }
+        - { name: target_id, in: query, schema: { type: string, format: uuid } }
+        - { name: since, in: query, schema: { type: string, format: date-time } }
+        - { name: before_id, in: query, schema: { type: integer } }
+        - { $ref: "#/components/parameters/Limit" }
+      responses: { "200": { description: OK } }
+  /v1/admin/kinds/{kind}:
+    parameters: [{ name: kind, in: path, required: true, schema: { type: string, pattern: "^[a-z][a-z0-9_]{1,31}$" } }]
+    put:
+      summary: Add or change an entry kind and its JSON Schema (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [description]
+              additionalProperties: false
+              properties:
+                description: { type: string }
+                attributes_schema: { type: object }
+                agent_requires_review: { type: boolean }
+      responses: { "200": { description: OK } }
+
+  /v1/stats:
+    get:
+      summary: Entry counts by space/status and kind, review queue size, projects (visible spaces only)
+      responses:
+        "200": { description: OK }
+  /v1/graph:
+    get:
+      summary: Knowledge graph — visible entries, links whose both ends are visible, implicit links, projects
+      description: |
+        Each node carries `mass` — characters of title, summary and body (volume of knowledge), `review_due` — active and
+        past its re-check date (ADR-12), and `used` — times delivered to agents or opened in the last 90 days (ADR-9).
+        `affinity` lists implicit links `{from, to, score}` between live entries of one space that are not linked
+        explicitly: TF-IDF cosine over characteristic lexemes, tags and source (same document or chat, same folder).
+        Each entry keeps up to 3 strongest neighbours; an entry without a live explicit link always gets its nearest
+        one. Computed on read, never stored. `activity` — hourly development events per project (entry revisions and
+        agent sessions started in the project) over the whole history: the map draws an activity halo from the last 24 hours
+        and replays history in the evolution player; `created_at` of nodes and links places them on that timeline.
+      parameters:
+        - { name: status, in: query, description: "comma-separated; default excludes archived", schema: { type: string } }
+      responses:
+        "200": { description: "{nodes: [{id, space, project, kind, title, status, pinned, tags, updated_at, created_at, mass, review_due, used}], links: [{from, to, rel, created_at}], affinity: [{from, to, score}], projects, activity: [{project, hour, events}], truncated}" }
+  /v1/health/history:
+    get:
+      summary: Daily health snapshots of the whole base (ADR-13) — score and per-check counts; global admin only
+      parameters:
+        - { name: days, in: query, schema: { type: integer, default: 90, maximum: 3650 } }
+      responses:
+        "200": { description: "{items: [{day, score, severity, live_entries, checks: {<id>: {severity, count}}}]}, oldest first" }
+        "403": { $ref: "#/components/responses/Problem" }
+  /v1/health:
+    get:
+      summary: Knowledge health report (ADR-8) — read-only detectors with severity, examples and suggested fixes
+      description: |
+        Checks: duplicate_content, near_duplicate_titles, contradictions, depends_on_retired, broken_supersede,
+        overdue_review, review_backlog, orphans, weak_entries, retrieval, open_sessions, access (global admin only).
+        Computed over the caller's readable spaces; non-admins see only their own retrieval stats. Changes nothing.
+      parameters:
+        - { name: project, in: query, description: "<space>/<slug>", schema: { type: string } }
+        - { name: limit, in: query, description: "examples per check (default 20, max 100)", schema: { type: integer } }
+        - name: lang
+          in: query
+          description: |
+            Language of the report texts (summary, title, message, suggestion, item detail). Takes precedence over
+            Accept-Language. Without it the first Accept-Language tag decides: one starting with "ru" gives Russian,
+            anything else — or no header — English.
+          schema: { type: string, enum: [en, ru] }
+        - { name: Accept-Language, in: header, description: "used when lang is not given (see lang)", schema: { type: string } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/HealthReport" } } } }
+        "403": { $ref: "#/components/responses/Problem" }
+  /v1/eval:
+    post:
+      summary: Retrieval evaluation (roadmap P1 #3) — recall@5, recall@k, MRR, empty rate, context hit on a labelled query set
+      description: |
+        Runs each case through the same search and context code agents use, within the caller's visibility.
+        Read-only; the runs are recorded as one `eval` audit event, not as searches. Expectations that resolve to no
+        visible live entry are reported as label errors and the case is excluded from the metrics.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cases]
+              additionalProperties: false
+              properties:
+                k: { type: integer, default: 10, maximum: 50 }
+                max_tokens: { type: integer, default: 3000 }
+                cases:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items:
+                    type: object
+                    required: [query, expect]
+                    properties:
+                      id: { type: string }
+                      query: { type: string }
+                      project: { type: string, description: "<space>/<slug>: boosts search, scopes context" }
+                      mode: { type: string, enum: [search, context, both], default: both }
+                      no_task: { type: boolean, description: Run the context without a task (session start) }
+                      note: { type: string }
+                      expect:
+                        type: array
+                        description: Each item is satisfied by any visible live entry it resolves to
+                        items:
+                          type: object
+                          properties:
+                            id: { type: string, format: uuid }
+                            source_ref: { type: string }
+                            title: { type: string, description: case-insensitive exact title }
+      responses:
+        "200": { description: "Report: summary {cases, label_errors, search_cases, recall_at_5, recall_at_k, mrr, empty_rate, context_cases, context_hit} and per-case ranks" }
+        "422": { $ref: "#/components/responses/Problem" }
+  /v1/admin/principals/{name}/disable:
+    parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
+    post:
+      summary: Disable a principal — all its tokens stop working (admin; not yourself)
+      responses: { "200": { description: OK } }
+  /v1/admin/principals/{name}/enable:
+    parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
+    post:
+      summary: Enable a principal again (admin)
+      responses: { "200": { description: OK } }
+
+components:
+  securitySchemes:
+    bearer: { type: http, scheme: bearer }
+
+  parameters:
+    EntryID: { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+    Cursor: { name: cursor, in: query, schema: { type: string } }
+    IdempotencyKey: { name: Idempotency-Key, in: header, schema: { type: string, maxLength: 200 } }
+    IfMatch: { name: If-Match, in: header, required: true, description: 'Current entry version, e.g. "3"', schema: { type: string } }
+
+  headers:
+    ETag: { description: 'Entry version, e.g. "3"', schema: { type: string } }
+
+  responses:
+    Problem:
+      description: Error
+      content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } }
+
+  schemas:
+    Problem:
+      type: object
+      required: [status, code, detail]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        code:
+          type: string
+          enum: [bad_request, unauthenticated, forbidden, forbidden_space, not_found, duplicate, conflict,
+                 invalid_transition, version_conflict, precondition_required, validation_failed,
+                 secret_detected, provenance_required, idempotency_mismatch, unsupported_mode, rate_limited, internal]
+        detail: { type: string }
+        existing_id: { type: string, format: uuid }
+        current_version: { type: integer }
+        findings: { type: array, items: { type: object, properties: { rule: { type: string }, field: { type: string }, offset: { type: integer } } } }
+
+    Status: { type: string, enum: [draft, proposed, active, deprecated, superseded, archived] }
+    LinkRel: { type: string, enum: [relates_to, depends_on, supersedes, derived_from, contradicts, references] }
+
+    Me:
+      type: object
+      properties:
+        principal: { type: object, properties: { id: { type: string }, kind: { type: string }, name: { type: string } } }
+        scopes: { type: array, items: { type: string } }
+        spaces: { type: array, items: { $ref: "#/components/schemas/SpaceAccess" } }
+    SpaceAccess:
+      type: object
+      properties:
+        slug: { type: string }
+        name: { type: string }
+        level: { type: string, enum: [none, read, write, review, admin] }
+    SpaceList: { type: object, properties: { items: { type: array, items: { $ref: "#/components/schemas/SpaceAccess" } } } }
+    Kind:
+      type: object
+      properties:
+        kind: { type: string }
+        description: { type: string }
+        attributes_schema: { type: object }
+        agent_requires_review: { type: boolean }
+        review_days: { type: [integer, "null"], minimum: 1, maximum: 3650, description: "Re-check period (ADR-12); null — none" }
+    KindList: { type: object, properties: { items: { type: array, items: { $ref: "#/components/schemas/Kind" } } } }
+
+    Project:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        space: { type: string }
+        slug: { type: string }
+        ref: { type: string, description: "<space>/<slug>" }
+        name: { type: string }
+        description: { type: string }
+        repo_urls: { type: array, items: { type: string } }
+        metadata: { type: object }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        archived_at: { type: [string, "null"], format: date-time }
+    ProjectList: { type: object, properties: { items: { type: array, items: { $ref: "#/components/schemas/Project" } } } }
+    CreateProject:
+      type: object
+      required: [space, slug]
+      additionalProperties: false
+      properties:
+        space: { type: string }
+        slug: { type: string, pattern: "^[a-z0-9][a-z0-9._-]{0,63}$" }
+        name: { type: string }
+        description: { type: string }
+        repo_urls: { type: array, items: { type: string } }
+        metadata: { type: object }
+    PatchProject:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string }
+        description: { type: string }
+        repo_urls: { type: array, items: { type: string } }
+        metadata: { type: object }
+        archived: { type: boolean }
+
+    Entry:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        space: { type: string }
+        project: { type: [string, "null"] }
+        kind: { type: string }
+        title: { type: string }
+        summary: { type: [string, "null"] }
+        body: { type: string }
+        attributes: { type: object }
+        tags: { type: array, items: { type: string } }
+        status: { $ref: "#/components/schemas/Status" }
+        pinned: { type: boolean }
+        confidence: { type: [number, "null"] }
+        version: { type: integer }
+        superseded_by: { type: [string, "null"], format: uuid }
+        review_after: { type: [string, "null"], format: date }
+        session_id: { type: [string, "null"], format: uuid }
+        source_ref: { type: [string, "null"] }
+        created_by: { type: string }
+        updated_by: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    EntryPage:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Entry" } }
+        next_cursor: { type: string }
+    Link:
+      type: object
+      properties:
+        from_id: { type: string, format: uuid }
+        to_id: { type: string, format: uuid }
+        rel: { $ref: "#/components/schemas/LinkRel" }
+        title: { type: string }
+        created_at: { type: string, format: date-time }
+    Links:
+      type: object
+      properties:
+        outgoing: { type: array, items: { $ref: "#/components/schemas/Link" } }
+        incoming: { type: array, items: { $ref: "#/components/schemas/Link" } }
+    EntryDetail:
+      allOf:
+        - $ref: "#/components/schemas/Entry"
+        - type: object
+          properties:
+            links: { $ref: "#/components/schemas/Links" }
+            usage:
+              type: object
+              description: "Usage of the last 30 days (ADR-9): shown in search, delivered in kn_context, opened in full. This read counts as opened after the response is built."
+              properties:
+                days: { type: integer }
+                shown: { type: integer }
+                delivered: { type: integer }
+                opened: { type: integer }
+                last_day: { type: [string, "null"], format: date }
+    EntryVersion:
+      type: object
+      properties:
+        version: { type: integer }
+        project: { type: [string, "null"] }
+        kind: { type: string }
+        title: { type: string }
+        summary: { type: [string, "null"] }
+        body: { type: string }
+        attributes: { type: object }
+        tags: { type: array, items: { type: string } }
+        status: { $ref: "#/components/schemas/Status" }
+        pinned: { type: boolean }
+        changed_by: { type: string }
+        change_note: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+    Similar:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        status: { type: string }
+        similarity: { type: number }
+    Warning:
+      type: object
+      properties:
+        code: { type: string, enum: [similar_entries, duplicate_content] }
+        message: { type: string }
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              title: { type: string }
+              status: { type: string }
+              similarity: { type: number }
+    EntryResult:
+      type: object
+      properties:
+        entry: { $ref: "#/components/schemas/Entry" }
+        warnings: { type: array, items: { $ref: "#/components/schemas/Warning" } }
+    CreateEntry:
+      type: object
+      required: [kind, title]
+      additionalProperties: false
+      description: Either space or project is required. Agents must send session_id or source_ref.
+      properties:
+        space: { type: string }
+        project: { type: string, description: "<space>/<slug>" }
+        kind: { type: string }
+        title: { type: string, minLength: 3, maxLength: 300 }
+        summary: { type: string, maxLength: 1000 }
+        body: { type: string, maxLength: 200000 }
+        attributes: { type: object, description: Validated against the kind's JSON Schema }
+        tags: { type: array, maxItems: 10, items: { type: string, pattern: "^[a-z0-9][a-z0-9-]{0,31}$" } }
+        pinned: { type: boolean, description: Humans only }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        review_after: { type: string, format: date }
+        session_id: { type: string, format: uuid }
+        source_ref: { type: string }
+        draft: { type: boolean }
+        allow_secret_patterns: { type: array, items: { type: string }, description: Humans with review only }
+        on_duplicate_content:
+          type: string
+          enum: [warn, reject]
+          default: warn
+          description: >-
+            A live entry of the space with the same text (whitespace-normalized, ≥ 200 chars): warn = save and return a
+            duplicate_content warning; reject = 409 duplicate_content with existing_id (for import scripts).
+    PatchEntry:
+      type: object
+      additionalProperties: false
+      properties:
+        project: { type: string, description: '"" detaches from the project' }
+        title: { type: string }
+        summary: { type: string, description: '"" clears' }
+        body: { type: string }
+        attributes: { type: object }
+        tags: { type: array, items: { type: string } }
+        pinned: { type: boolean }
+        confidence: { type: number }
+        review_after: { type: string, description: 'YYYY-MM-DD, "" clears' }
+        source_ref: { type: string }
+        change_note: { type: string }
+        allow_secret_patterns: { type: array, items: { type: string } }
+
+    SearchRequest:
+      type: object
+      required: [q]
+      additionalProperties: false
+      properties:
+        q: { type: string, description: 'websearch syntax: "phrase", -exclude, or' }
+        spaces: { type: array, items: { type: string } }
+        project: { type: string, description: Boosts entries of this project ×1.5 }
+        project_only: { type: boolean }
+        kinds: { type: array, items: { type: string } }
+        status: { type: array, items: { $ref: "#/components/schemas/Status" }, description: "default: active, proposed, deprecated" }
+        tags: { type: array, items: { type: string } }
+        mode: { type: string, enum: [fts], description: hybrid is reserved for phase 3 }
+        limit: { type: integer, default: 20 }
+        cursor: { type: string }
+    SearchPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              space: { type: string }
+              project: { type: [string, "null"] }
+              kind: { type: string }
+              title: { type: string }
+              summary: { type: [string, "null"] }
+              status: { $ref: "#/components/schemas/Status" }
+              version: { type: integer }
+              tags: { type: array, items: { type: string } }
+              score: { type: number }
+              highlight: { type: string, description: "matches wrapped in **" }
+              updated_at: { type: string, format: date-time }
+        next_cursor: { type: string }
+
+    ContextRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        project: { type: string }
+        repo_url: { type: string }
+        task: { type: string }
+        spaces: { type: array, items: { type: string } }
+        max_tokens: { type: integer, default: 10000, maximum: 50000 }
+        sections: { type: array, items: { type: string, enum: [rules, handoff, decisions, lessons, related] } }
+    ContextResult:
+      type: object
+      properties:
+        project: { type: [object, "null"], properties: { ref: { type: string }, name: { type: string } } }
+        sections:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+                description: "With a task: rules, handoff, task, more. Without: rules, handoff, decisions, lessons, facts, more. handoff is unfinished work of earlier sessions (ADR-11); more is the index of entries that did not fit (ADR-10)."
+              items:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    kind: { type: string }
+                    title: { type: string }
+                    project: { type: string }
+                    content: { type: string }
+                    truncated: { type: boolean }
+        markdown: { type: string }
+        token_estimate: { type: integer }
+        truncated: { type: boolean, description: Something did not fit the budget }
+        indexed_count: { type: integer, description: Did not fit; listed by id and title in section more (up to 15) }
+        omitted_count: { type: integer, description: Did not fit and not listed }
+
+    HealthItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        kind: { type: string }
+        space: { type: string }
+        project: { type: [string, "null"] }
+        status: { $ref: "#/components/schemas/Status" }
+        links: { type: integer }
+        created_at: { type: string, format: date-time }
+        created_by: { type: string }
+        detail: { type: string }
+    HealthCheck:
+      type: object
+      properties:
+        id: { type: string }
+        title: { type: string }
+        severity: { type: string, enum: [ok, info, warn, critical] }
+        count: { type: integer }
+        message: { type: string }
+        suggestion: { type: string }
+        items: { type: array, items: { $ref: "#/components/schemas/HealthItem" } }
+        pairs:
+          type: array
+          items:
+            type: object
+            properties:
+              a: { $ref: "#/components/schemas/HealthItem" }
+              b: { $ref: "#/components/schemas/HealthItem" }
+              similarity: { type: number }
+              rel: { type: string }
+        groups: { type: array, items: { type: array, items: { $ref: "#/components/schemas/HealthItem" } } }
+    HealthReport:
+      type: object
+      properties:
+        generated_at: { type: string, format: date-time }
+        project: { type: [string, "null"] }
+        spaces: { type: array, items: { type: string } }
+        score: { type: integer, minimum: 0, maximum: 100 }
+        severity: { type: string, enum: [ok, info, warn, critical] }
+        live_entries: { type: integer }
+        summary: { type: string }
+        checks: { type: array, items: { $ref: "#/components/schemas/HealthCheck" } }
+
+    Session:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        space: { type: string }
+        project: { type: [string, "null"] }
+        agent: { type: string }
+        client_info: { type: object }
+        started_at: { type: string, format: date-time }
+        ended_at: { type: [string, "null"], format: date-time }

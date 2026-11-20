@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.work
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: services/web-ui/web/package-lock.json
+      - name: Frontend deps
+        run: cd services/web-ui/web && npm ci --no-audit --no-fund
+      - name: Lint (go vet, OpenAPI, TypeScript)
+        run: make lint
+      - name: Frontend build
+        run: cd services/web-ui/web && npm run build
+      - name: Postgres for integration tests
+        run: make secrets && docker compose -f deploy/docker-compose.yml up -d --wait postgres
+      - name: Unit and integration tests
+        run: make test

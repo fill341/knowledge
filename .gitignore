@@ -1,0 +1,24 @@
+# secrets and local data — never commit
+deploy/secrets/*
+!deploy/secrets/.gitkeep
+deploy/backups/
+deploy/.env
+
+# build output
+/bin/
+*.test
+*.out
+
+.DS_Store
+.idea/
+.vscode/
+
+# web UI build output (embedded into kn-ui at build time) and deps
+services/web-ui/internal/static/dist/*
+!services/web-ui/internal/static/dist/.keep
+services/web-ui/web/node_modules/
+eval/local/
+
+# local export settings (names of private projects) — never commit
+seed/*.local.*
+scripts/*.local.*

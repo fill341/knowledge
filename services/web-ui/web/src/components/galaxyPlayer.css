@@ -1,0 +1,24 @@
+/* Evolution player under the galaxy: play button, activity strip with a slider over it, date, speed. */
+.galaxy-player {
+  pointer-events: auto; display: flex; align-items: center; gap: 8px; max-width: 760px;
+  background: rgba(15,20,32,0.85); border: 1px solid #2a3245; border-radius: 10px; padding: 6px 10px; backdrop-filter: blur(6px);
+  color: #e2e8f0; font-size: 12.5px;
+}
+.galaxy-player.on { border-color: #818cf8; box-shadow: 0 0 0 1px rgba(129,140,248,0.25), 0 0 24px rgba(129,140,248,0.15); }
+.galaxy-player .graph-btn { background: transparent; }
+.galaxy-timeline { position: relative; flex: 1; min-width: 160px; height: 28px; }
+.galaxy-timeline svg { position: absolute; inset: 2px 0 6px; width: 100%; height: calc(100% - 8px); }
+.galaxy-timeline svg path { fill: rgba(129,140,248,0.35); stroke: rgba(165,180,252,0.7); stroke-width: 0.6; vector-effect: non-scaling-stroke; }
+.galaxy-timeline input[type="range"] {
+  position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; background: transparent; appearance: none; -webkit-appearance: none; cursor: pointer;
+}
+.galaxy-timeline input[type="range"]::-webkit-slider-runnable-track { height: 100%; background: transparent; border-bottom: 1px solid #2a3245; }
+.galaxy-timeline input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 3px; height: 28px; background: #c7d2fe; border-radius: 2px; box-shadow: 0 0 10px #818cf8;
+}
+.galaxy-timeline input[type="range"]::-moz-range-thumb { width: 3px; height: 28px; background: #c7d2fe; border: 0; border-radius: 2px; }
+.galaxy-date { min-width: 92px; font-variant-numeric: tabular-nums; color: #c7d2fe; white-space: nowrap; }
+.galaxy-date.live { color: #8b95ab; }
+@media (max-width: 640px) { .galaxy-date { min-width: 0; } .galaxy-player { flex-wrap: wrap; } }
+/* The hint stays on one line under the legend so it never runs into the chips. */
+.graph-wrap.galaxy .graph-hint { right: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

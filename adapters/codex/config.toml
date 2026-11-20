@@ -1,0 +1,3 @@
+[mcp_servers.knowledge]
+command = "/path/to/knowledge/scripts/kn-mcp-launch"
+args = ["codex", "work"]
