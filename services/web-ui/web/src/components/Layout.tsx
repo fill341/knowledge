@@ -3,6 +3,7 @@ import { NavLink, Outlet } from "react-router-dom";
 import { api, canReview, isAdmin } from "../api";
 import { useAuth } from "../auth";
 import { useT } from "../i18n";
+import { Credits } from "./Credits";
 import { PrefsControls } from "../prefs";
 
 // Pages call notifyChanged() after mutations so counters (review queue) refresh.
@@ -64,6 +65,7 @@ export function Layout() {
             ))}
           </div>
           <button className="btn sm" style={{ marginTop: 10 }} onClick={() => void logout()}>{t("layout.logout")}</button>
+          <Credits />
         </div>
       </aside>
       <main className="main">

@@ -111,6 +111,9 @@ const en = {
   "nav.data": "Export & import",
   "layout.levelTitle": "level: {level}",
   "layout.logout": "Log out",
+  "credits.source": "Source code on GitHub",
+  "credits.license": "MIT License",
+  "credits.issues": "Report an issue",
 
   // ── Login ───────────────────────────────────────────────────────────
   "login.title": "Sign in",
@@ -600,6 +603,9 @@ const ru: Record<MsgKey, Msg> = {
   "nav.data": "Экспорт и импорт",
   "layout.levelTitle": "уровень: {level}",
   "layout.logout": "Выйти",
+  "credits.source": "Исходный код на GitHub",
+  "credits.license": "Лицензия MIT",
+  "credits.issues": "Сообщить о проблеме",
 
   "login.title": "Вход",
   "login.hint": "Проще всего — одна команда в терминале: она откроет эту страницу уже с входом.",

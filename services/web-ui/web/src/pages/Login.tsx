@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useAuth } from "../auth";
+import { Credits } from "../components/Credits";
 import { CopyButton, errorText } from "../components/ui";
 import { useT } from "../i18n";
 import { PrefsControls } from "../prefs";
@@ -60,6 +61,7 @@ export function Login() {
         {!!error && <div className="alert error">{errorText(error)}</div>}
         <button className="btn primary" disabled={busy || !token.trim()}>{t("login.submit")}</button>
       </form>
+      <Credits className="login-credits" />
     </div>
   );
 }
