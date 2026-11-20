@@ -12,11 +12,12 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.work
-      - uses: actions/setup-node@v4
+          cache-dependency-path: "**/go.sum"
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -28,6 +29,7 @@ jobs:
       - name: Frontend build
         run: cd services/web-ui/web && npm run build
       - name: Postgres for integration tests
-        run: make secrets && docker compose -f deploy/docker-compose.yml up -d --wait postgres
+        # On Linux the postgres container runs under its own uid and must be able to read the password files.
+        run: make secrets && chmod a+r deploy/secrets/* && docker compose -f deploy/docker-compose.yml up -d --wait postgres
       - name: Unit and integration tests
         run: make test
